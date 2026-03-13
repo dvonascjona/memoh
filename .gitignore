@@ -102,6 +102,7 @@ dump.rdb
 memory.db
 
 config.toml
+conf/app.1panel.toml
 
 .workdocs/
 data

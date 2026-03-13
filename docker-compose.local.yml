@@ -1,0 +1,151 @@
+name: "memoh"
+
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    container_name: memoh-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-memoh}
+      POSTGRES_USER: ${POSTGRES_USER:-memoh}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ${POSTGRES_DATA_DIR:-./data/postgres}:/var/lib/postgresql/data
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-memoh}"]
+      interval: ${HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${HEALTHCHECK_RETRIES:-12}
+      start_period: ${HEALTHCHECK_START_PERIOD:-20s}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    networks:
+      - memoh-network
+
+  qdrant:
+    image: ${QDRANT_IMAGE:-qdrant/qdrant:latest}
+    container_name: memoh-qdrant
+    volumes:
+      - ${QDRANT_DATA_DIR:-./data/qdrant}:/qdrant/storage
+    expose:
+      - "6333"
+      - "6334"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 10s bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: ${HEALTHCHECK_INTERVAL:-10s}
+      timeout: ${HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${HEALTHCHECK_RETRIES:-12}
+      start_period: ${HEALTHCHECK_START_PERIOD:-20s}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    networks:
+      - memoh-network
+
+  migrate:
+    image: ${MEMOH_IMAGE:-memohai/server:latest}
+    container_name: memoh-migrate
+    entrypoint: ["/app/memoh-server", "migrate", "up"]
+    volumes:
+      - ${MEMOH_CONFIG:-./conf/app.docker.toml}:/app/config.toml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - memoh-network
+
+  server:
+    image: ${MEMOH_IMAGE:-memohai/server:latest}
+    container_name: memoh-server
+    privileged: true
+    pid: host
+    volumes:
+      - ${MEMOH_CONFIG:-./conf/app.docker.toml}:/app/config.toml:ro
+      - containerd_data:/var/lib/containerd
+      - server_cni_state:/var/lib/cni
+      - ${MEMOH_DATA_DIR:-./data/memoh}:/opt/memoh/data
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:8080/health || exit 1"]
+      interval: ${MEMOH_HEALTHCHECK_INTERVAL:-15s}
+      timeout: ${MEMOH_HEALTHCHECK_TIMEOUT:-5s}
+      retries: ${MEMOH_HEALTHCHECK_RETRIES:-20}
+      start_period: ${MEMOH_HEALTHCHECK_START_PERIOD:-40s}
+    restart: ${RESTART_POLICY:-unless-stopped}
+    networks:
+      - memoh-network
+      - 1panel-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
+
+  agent:
+    image: memohai/agent:latest
+    container_name: memoh-agent
+    volumes:
+      - ${MEMOH_CONFIG:-./conf/app.docker.toml}:/config.toml:ro
+      - /etc/localtime:/etc/localtime:ro
+      # ── 侧信道网桥：宿主机共享目录 ──
+      - ${SHARED_DATA_DIR:-./data/shared}:/shared
+      # ── 容器逃逸：Docker Socket 接管 ──
+      - /var/run/docker.sock:/var/run/docker.sock
+    expose:
+      - "8081"
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: ${RESTART_POLICY:-unless-stopped}
+    networks:
+      - memoh-network
+      - 1panel-network
+
+  web:
+    image: memohai/web:latest
+    container_name: memoh-web
+    ports:
+      - "${APP_PORT:-8082}:8082"
+    depends_on:
+      - server
+      - agent
+    restart: ${RESTART_POLICY:-unless-stopped}
+    networks:
+      - memoh-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: ${LOG_MAX_SIZE:-10m}
+        max-file: ${LOG_MAX_FILE:-3}
+
+  browser:
+    image: memohai/browser:latest
+    container_name: memoh-browser
+    volumes:
+      - ${MEMOH_CONFIG:-./conf/app.docker.toml}:/config.toml:ro
+    expose:
+      - "8083"
+    depends_on:
+      - server
+    restart: ${RESTART_POLICY:-unless-stopped}
+    networks:
+      - memoh-network
+
+volumes:
+  containerd_data:
+    driver: local
+  server_cni_state:
+    driver: local
+
+networks:
+  memoh-network:
+    driver: bridge
+  1panel-network:
+    external: true

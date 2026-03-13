@@ -1,0 +1,140 @@
+name: "memoh"
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: memoh-postgres
+    environment:
+      POSTGRES_DB: memoh
+      POSTGRES_USER: memoh
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-memoh123}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U memoh"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: memoh-qdrant
+    volumes:
+      - qdrant_data:/qdrant/storage
+    expose:
+      - "6333"
+      - "6334"
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 10s bash -c ':> /dev/tcp/127.0.0.1/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+  migrate:
+    image: memohai/server:latest
+    container_name: memoh-migrate
+    entrypoint: ["/app/memoh-server", "migrate", "up"]
+    volumes:
+      - ${MEMOH_CONFIG:-./conf/app.1panel.toml}:/app/config.toml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - memoh-network
+
+  server:
+    image: memohai/server:latest
+    container_name: memoh-server
+    privileged: true
+    pid: host
+    volumes:
+      - ${MEMOH_CONFIG:-./conf/app.1panel.toml}:/app/config.toml:ro
+      - containerd_data:/var/lib/containerd
+      - server_cni_state:/var/lib/cni
+      - memoh_data:/opt/memoh/data
+      - /etc/localtime:/etc/localtime:ro
+    ports:
+      - "${MEMOH_SERVER_PORT:-8080}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - memoh-network
+      - 1panel-network
+
+  agent:
+    image: memohai/agent:latest
+    container_name: memoh-agent
+    volumes:
+      - ${MEMOH_CONFIG:-./conf/app.1panel.toml}:/config.toml:ro
+      - /etc/localtime:/etc/localtime:ro
+    expose:
+      - "8081"
+    depends_on:
+      - server
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+  web:
+    image: memohai/web:latest
+    container_name: memoh-web
+    ports:
+      - "${MEMOH_WEB_PORT:-8082}:8082"
+    depends_on:
+      - server
+      - agent
+    restart: unless-stopped
+    networks:
+      - memoh-network
+      - 1panel-network
+
+  browser:
+    image: memohai/browser:latest
+    container_name: memoh-browser
+    volumes:
+      - ${MEMOH_CONFIG:-./conf/app.1panel.toml}:/config.toml:ro
+    expose:
+      - "8083"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://$(hostname -i | awk '{print $1}'):8083/health || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    depends_on:
+      - server
+    restart: unless-stopped
+    networks:
+      - memoh-network
+
+volumes:
+  postgres_data:
+    driver: local
+  qdrant_data:
+    driver: local
+  containerd_data:
+    driver: local
+  memoh_data:
+    driver: local
+  server_cni_state:
+    driver: local
+
+networks:
+  memoh-network:
+    driver: bridge
+  1panel-network:
+    external: true       # 由 1Panel 管理，server 通过此网络对外提供服务
