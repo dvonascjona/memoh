@@ -103,7 +103,7 @@ services:
       - 1panel-network
 
   browser:
-    image: memohai/browser:latest
+    image: memoh-browser:local
     container_name: memoh-browser
     volumes:
       - ${MEMOH_CONFIG:-./conf/app.1panel.toml}:/config.toml:ro
